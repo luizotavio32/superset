@@ -6,7 +6,7 @@ from typing import Tuple
 
 year_of_interest = '2015'
 
-migration_dir = '/Users/luiz_demedierosportellopassos/Desktop/repo/superset/superset/migrations/versions'
+migration_dir = '../versions'
 
 migration_files = os.listdir(migration_dir)
 
