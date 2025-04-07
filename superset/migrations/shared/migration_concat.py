@@ -4,7 +4,7 @@ import ast
 from typing import Tuple
 
 
-year_of_interest = '2015'
+year_of_interest = '2016'
 
 migration_dir = '../versions'
 
@@ -17,6 +17,7 @@ filtered_files = [
 
 upgrades = []
 downgrades = []
+classes_string = ''
 
 class ImportFinder(ast.NodeVisitor):
     def __init__(self):
@@ -48,6 +49,19 @@ class FunctionFinder(ast.NodeVisitor):
             self.node = node
         self.generic_visit(node)
 
+class ClassVisitor(ast.NodeVisitor):
+    def __init__(self, source_code):
+        self.source_code = source_code
+        self.classes = []
+
+    def get_source_segment(self, node):
+        return ast.get_source_segment(self.source_code, node)
+    
+    def visit_ClassDef(self, node):
+        class_source = self.get_source_segment(node)
+        self.classes.append((node.name, class_source))
+        self.generic_visit(node)
+
 def generate_imports_string(imports: list, from_imports: list) -> str:
 
     import_string = ""
@@ -66,6 +80,21 @@ def generate_imports_string(imports: list, from_imports: list) -> str:
 
     return import_string
 
+def generate_classes_string(classes):
+    """
+    Combine class definitions into a single string.
+
+    Parameters:
+    - classes: A list of tuples, each containing the class name and its source code.
+
+    Returns:
+    - A string containing all class definitions.
+    """
+    class_definitions = []
+    for _, class_source in classes:
+        class_definitions.append(class_source)
+    return "\n\n".join(class_definitions)
+
 import_finder = ImportFinder()
 
 for filename in filtered_files:
@@ -76,6 +105,9 @@ for filename in filtered_files:
         parsed_code = ast.parse(migration_code)
 
         import_finder.visit(parsed_code)  
+
+        class_finder = ClassVisitor(migration_code)
+        class_finder.visit(parsed_code)
 
         upgrade_finder = FunctionFinder('upgrade')
         upgrade_finder.visit(parsed_code)
@@ -88,6 +120,9 @@ for filename in filtered_files:
         
         if downgrade_finder.node:
             downgrade_code = ast.get_source_segment(migration_code, downgrade_finder.node).replace("def downgrade():\n", "")
+
+        if len(class_finder.classes) > 0:
+            classes_string += '\n\n' + generate_classes_string(classes=class_finder.classes)
 
         if upgrade_code:
             upgrades.append(f"# From {filename}\n{upgrade_code}")
@@ -103,6 +138,7 @@ new_migration_content = f"""
 \"""Consolidated migration file for {consolidation_year}"\"\"
 
 {import_string}
+{classes_string}
 
 def upgrade():
     {final_upgrade}
