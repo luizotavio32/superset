@@ -17,6 +17,7 @@
 from typing import Any
 
 from superset.utils.core import as_list
+from superset.migrations.shared.migrate_viz.query_functions import *
 
 from .base import MigrateViz
 
@@ -35,7 +36,7 @@ class MigrateTreeMap(MigrateViz):
         ):
             self.data["metric"] = self.data["metrics"][0]
 
-    def build_query():
+    def build_query(form_data):
         pass
 
 
@@ -167,8 +168,75 @@ class TimeseriesChart(MigrateViz):
         if x_ticks_layout := self.data.get("x_ticks_layout"):
             self.data["x_ticks_layout"] = 45 if x_ticks_layout == "45°" else 0
 
-    def build_query():
-        pass
+    def build_query(self):
+        groupby = self.data.get("groupby")
+    
+        def query_builder(base_query_object):
+            """
+            The `pivot_operator_in_runtime` determines how to pivot the dataframe returned from the raw query.
+            1. If it's a time compared query, there will return a pivoted dataframe that append time compared metrics. for instance:
+            
+                            MAX(value) MAX(value)__1 year ago MIN(value) MIN(value)__1 year ago
+            city               LA                     LA         LA                     LA
+            __timestamp
+            2015-01-01      568.0                  671.0        5.0                    6.0
+            2015-02-01      407.0                  649.0        4.0                    3.0
+            2015-03-01      318.0                  465.0        0.0                    3.0
+            
+            2. If it's a normal query, there will return a pivoted dataframe.
+            
+                        MAX(value)  MIN(value)
+            city               LA          LA
+            __timestamp
+            2015-01-01      568.0         5.0
+            2015-02-01      407.0         4.0
+            2015-03-01      318.0         0.0
+            """
+            # only add series limit metric if it's explicitly needed e.g. for sorting
+            extra_metrics = extract_extra_metrics(self.data)
+            
+            pivot_operator_in_runtime = (
+                time_compare_pivot_operator(self.data, base_query_object) 
+                if is_time_comparison(self.data, base_query_object) 
+                else pivot_operator(self.data, base_query_object)
+            )
+            
+            columns = (
+                (ensure_is_array(get_x_axis_column(self.data)) if is_x_axis_set(self.data) else []) +
+                ensure_is_array(groupby)
+            )
+            
+            time_offsets = self.data.get("time_compare") if is_time_comparison(self.data, base_query_object) else []
+            
+            result = {
+                **base_query_object,
+                "metrics": (base_query_object.get("metrics") or []) + extra_metrics,
+                "columns": columns,
+                "series_columns": groupby,
+                **({"is_timeseries": True} if not is_x_axis_set(self.data) else {}),
+                # todo: move `normalize_order_by to extract_query_fields`
+                "orderby": normalize_order_by(base_query_object).get("orderby"),
+                "time_offsets": time_offsets,
+                # Note that:
+                # 1. The resample, rolling, cum, timeCompare operators should be after pivot.
+                # 2. the flatOperator makes multiIndex Dataframe into flat Dataframe
+                "post_processing": [
+                    pivot_operator_in_runtime,
+                    rolling_window_operator(self.data, base_query_object),
+                    time_compare_operator(self.data, base_query_object),
+                    resample_operator(self.data, base_query_object),
+                    rename_operator(self.data, base_query_object),
+                    contribution_operator(self.data, base_query_object, time_offsets),
+                    sort_operator(self.data, base_query_object),
+                    flatten_operator(self.data, base_query_object),
+                    # todo: move prophet before flatten
+                    prophet_operator(self.data, base_query_object),
+                ]
+            }
+            
+            return [result]
+    
+        return build_query_context(self.data, query_builder)
 
 
 class MigrateLineChart(TimeseriesChart):
@@ -188,6 +256,8 @@ class MigrateLineChart(TimeseriesChart):
             self.target_viz_type = "echarts_timeseries_step"
             self.data["seriesType"] = "end"
 
+    def build_query(self):
+        return super().build_query()
 
 class MigrateAreaChart(TimeseriesChart):
     source_viz_type = "area"
