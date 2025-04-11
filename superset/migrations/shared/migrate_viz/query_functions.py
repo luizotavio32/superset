@@ -553,6 +553,8 @@ def sanitize_clause(clause: str) -> str:
     Sanitize a SQL clause. If the clause contains '--', append a newline.
     Then wrap the clause in parentheses.
     """
+    if clause is None:
+        return "()"
     sanitized_clause = clause
     if "--" in clause:
         sanitized_clause = clause + "\n"
@@ -1074,3 +1076,66 @@ def prophet_operator(form_data: dict, query_object: dict) -> dict:
             },
         }
     return None
+
+
+def rank_operator(form_data: dict, query_object: dict, options: dict) -> dict:
+    """
+    Returns a post-processing configuration for ranking.
+
+    Args:
+        form_data (dict): The form data for the query.
+        query_object (dict): The base query object.
+        options (dict): Options for the rank operator.
+
+    Returns:
+        dict: A configuration dict with the ranking operation.
+    """
+    return {
+        "operation": "rank",
+        "options": options,
+    }
+
+def histogram_operator(form_data: dict, query_object: dict) -> dict:
+    bins = form_data.get("bins")
+    column = form_data.get("column")
+    cumulative = form_data.get("cumulative")
+    groupby = form_data.get("groupby", [])
+    normalize = form_data.get("normalize")
+    try:
+        parsed_bins = int(bins)
+    except (TypeError, ValueError):
+        parsed_bins = 5
+    parsed_column = get_column_label(column)
+    parsed_groupby = [get_column_label(g) for g in groupby]
+    return {
+        "operation": "histogram",
+        "options": {
+            "column": parsed_column,
+            "groupby": parsed_groupby,
+            "bins": parsed_bins,
+            "cumulative": cumulative,
+            "normalize": normalize,
+        },
+    }
+
+def retain_form_data_suffix(form_data: dict, control_suffix: str) -> dict:
+    new_form_data = {}
+    entries = sorted(
+        form_data.items(),
+        key=lambda kv: 1 if kv[0].endswith(control_suffix) else 0,
+        reverse=True,
+    )
+    for key, value in entries:
+        if key.endswith(control_suffix):
+            new_form_data[key[:-len(control_suffix)]] = value
+        elif key not in new_form_data:
+            new_form_data[key] = value
+    return new_form_data
+
+
+def remove_form_data_suffix(form_data: dict, control_suffix: str) -> dict:
+    new_form_data = {}
+    for key, value in form_data.items():
+        if not key.endswith(control_suffix):
+            new_form_data[key] = value
+    return new_form_data
