@@ -59,6 +59,6 @@ def run(id: int | None = None) -> None:
     
     migrate_line_chart_obj = MigrateLineChart(form_data)
     result = migrate_line_chart_obj.build_query()
-    print(result)
+    print(json.dumps(result))
 
 

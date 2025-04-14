@@ -554,7 +554,7 @@ def sanitize_clause(clause: str) -> str:
     Then wrap the clause in parentheses.
     """
     if clause is None:
-        return "()"
+        return ""
     sanitized_clause = clause
     if "--" in clause:
         sanitized_clause = clause + "\n"
@@ -570,13 +570,8 @@ def convert_filter(filter_item: dict) -> dict:
     return filter_item
 
 def is_simple_adhoc_filter(filter_item: dict) -> bool:
-    """
-    Determine if an adhoc filter is 'simple' (i.e. has simple structure)
-    or a freeform SQL expression.
-    For illustration, we assume that if the filter has a "sqlExpression" key,
-    it is not simple.
-    """
-    return "sqlExpression" not in filter_item
+    return filter_item.get("expressionType") == "SIMPLE"
+
 
 def process_filters(form_data: dict) -> dict:
     """
@@ -719,11 +714,6 @@ def build_query_object(form_data, query_fields=None):
     
     # Build the query object
     query_object = {
-        # Use None instead of undefined for these fields
-        'time_range': time_range or None,
-        'since': since or None,
-        'until': until or None,
-        'granularity': granularity or None,
         **extras,
         **extras_and_filters,
         'columns': columns,
@@ -741,6 +731,11 @@ def build_query_object(form_data, query_fields=None):
         'url_params': url_params or None,
         'custom_params': custom_params,
     }
+
+    for key, value in [("time_range", time_range), ("since", since), ("until", until), ("granularity", granularity)]:
+        if value is not None:
+            query_object[key] = value
+    
     
     # Override extra form data
     query_object = override_extra_form_data(query_object, overrides)
