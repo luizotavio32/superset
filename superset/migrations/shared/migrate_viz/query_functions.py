@@ -38,6 +38,27 @@ class DatasourceType(Enum):
     SlTable = "sl_table"
     SavedQuery = "saved_query"
 
+UNARY_OPERATORS = ['IS NOT NULL', 'IS NULL']
+BINARY_OPERATORS = [
+    '==',
+    '!=',
+    '>',
+    '<',
+    '>=',
+    '<=',
+    'ILIKE',
+    'LIKE',
+    'NOT LIKE',
+    'REGEX',
+    'TEMPORAL_RANGE',
+]
+SET_OPERATORS = ['IN', 'NOT IN']
+
+unary_operator_set = set(UNARY_OPERATORS)
+binary_operator_set = set(BINARY_OPERATORS)
+set_operator_set = set(SET_OPERATORS)
+
+
 class DatasourceKey:
     def __init__(self, key: str):
         id_str, type_str = key.split('__', 1)
@@ -538,6 +559,8 @@ def extract_extras(form_data: dict) -> dict:
     # Remove temporary keys
     extract.pop("granularity_sqla", None)
     extract.pop("time_grain_sqla", None)
+    if extract["granularity"] is None:
+        extract.pop("granularity", None)
 
     return extract
 
@@ -560,14 +583,31 @@ def sanitize_clause(clause: str) -> str:
         sanitized_clause = clause + "\n"
     return f"({sanitized_clause})"
 
+def is_unary_operator(operator: str) -> bool:
+    return operator in unary_operator_set
+
+def is_binary_operator(operator: str) -> bool:
+    return operator in binary_operator_set
+
+def is_set_operator(operator: str) -> bool:
+    return operator in set_operator_set
+
+def is_unary_adhoc_filter(filter_item: dict) -> bool:
+    return is_unary_operator(filter_item.get("operator"))
+
+def is_binary_adhoc_filter(filter_item: dict) -> bool:
+    return is_binary_operator(filter_item.get("operator"))
+
 def convert_filter(filter_item: dict) -> dict:
-    """
-    Convert a simple adhoc filter to a filter clause.
-    Implement the conversion logic here.
-    For now, this function returns the filter item unchanged.
-    """
-    # ...existing conversion logic...
-    return filter_item
+    subject = filter_item.get("subject")
+    if is_unary_adhoc_filter(filter_item):
+        operator = filter_item.get("operator")
+        return {"col": subject, "op": operator}
+    if is_binary_adhoc_filter(filter_item):
+        operator = filter_item.get("operator")
+        return {"col": subject, "op": operator, "val": filter_item.get("comparator")}
+    operator = filter_item.get("operator")
+    return {"col": subject, "op": operator, "val": filter_item.get("comparator")}
 
 def is_simple_adhoc_filter(filter_item: dict) -> bool:
     return filter_item.get("expressionType") == "SIMPLE"
@@ -720,19 +760,18 @@ def build_query_object(form_data, query_fields=None):
         'metrics': metrics,
         'orderby': orderby,
         'annotation_layers': annotation_layers,
-        'row_limit': None if row_limit is None or math.isnan(numeric_row_limit) else numeric_row_limit,
-        'row_offset': None if row_offset is None or math.isnan(numeric_row_offset) else numeric_row_offset,
         'series_columns': series_columns,
-        'series_limit': series_limit if series_limit is not None else (float(limit) if is_defined(limit) else 0),
-        'series_limit_metric': (normalize_series_limit_metric(series_limit_metric) or 
-                               timeseries_limit_metric or 
-                               None),
-        'order_desc': True if order_desc is None else order_desc,
-        'url_params': url_params or None,
+        'url_params': url_params,
         'custom_params': custom_params,
     }
 
-    for key, value in [("time_range", time_range), ("since", since), ("until", until), ("granularity", granularity)]:
+    row_offset = None if row_offset is None or math.isnan(numeric_row_offset) else numeric_row_offset
+    series_limit_metric = (normalize_series_limit_metric(series_limit_metric) or timeseries_limit_metric or None)
+    row_limit = None if row_limit is None or math.isnan(numeric_row_limit) else numeric_row_limit
+    order_desc = True if order_desc is None else order_desc
+    series_limit = series_limit if series_limit is not None else (float(limit) if is_defined(limit) else 0)
+
+    for key, value in [("time_range", time_range), ("since", since), ("until", until), ("granularity", granularity), ("series_limit_metric", series_limit_metric), ("row_offset", row_offset), ("row_limit", row_limit), ("order_desc", order_desc), ("series_limit", series_limit)]:
         if value is not None:
             query_object[key] = value
     
