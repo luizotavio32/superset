@@ -21,7 +21,7 @@ from superset.migrations.shared.migrate_viz.query_functions import *
 
 from .base import MigrateViz
 
-
+## OK 
 class MigrateTreeMap(MigrateViz):
     source_viz_type = "treemap"
     target_viz_type = "treemap_v2"
@@ -49,7 +49,7 @@ class MigrateTreeMap(MigrateViz):
         
         return build_query_context(self.data, process)
 
-
+## OK
 class MigratePivotTable(MigrateViz):
     source_viz_type = "pivot_table"
     target_viz_type = "pivot_table_v2"
@@ -115,13 +115,14 @@ class MigratePivotTable(MigrateViz):
             elif isinstance(metrics, list) and metrics and metrics[0]:
                 orderby = [[metrics[0], not order_desc]]
             new_query_object = base_query_object.copy()
-            new_query_object["orderby"] = orderby
+            if orderby is not None:
+                new_query_object["orderby"] = orderby
             new_query_object["columns"] = columns
             return [new_query_object]
 
         return build_query_context(self.data, process)
 
-
+## 
 class MigrateDualLine(MigrateViz):
     has_x_axis_control = True
     source_viz_type = "dual_line"
@@ -182,6 +183,7 @@ class MigrateDualLine(MigrateViz):
         return merged
 
 
+## OK
 class MigrateSunburst(MigrateViz):
     source_viz_type = "sunburst"
     target_viz_type = "sunburst_v2"
@@ -200,6 +202,7 @@ class MigrateSunburst(MigrateViz):
         return build_query_context(self.data, process)
 
 
+## OK
 class TimeseriesChart(MigrateViz):
     has_x_axis_control = True
     rename_keys = {
@@ -325,6 +328,7 @@ class TimeseriesChart(MigrateViz):
         return build_query_context(self.data, query_builder)
 
 
+## OK
 class MigrateLineChart(TimeseriesChart):
     source_viz_type = "line"
     target_viz_type = "echarts_timeseries_line"
@@ -346,6 +350,7 @@ class MigrateLineChart(TimeseriesChart):
         return super().build_query()
 
 
+## OK
 class MigrateAreaChart(TimeseriesChart):
     source_viz_type = "area"
     target_viz_type = "echarts_area"
@@ -370,6 +375,7 @@ class MigrateAreaChart(TimeseriesChart):
         return super().build_query()
 
 
+## OK
 class MigrateBarChart(TimeseriesChart):
     source_viz_type = "bar"
     target_viz_type = "echarts_timeseries_bar"
@@ -387,6 +393,7 @@ class MigrateBarChart(TimeseriesChart):
         return super().build_query()
 
 
+## OK
 class MigrateDistBarChart(TimeseriesChart):
     source_viz_type = "dist_bar"
     target_viz_type = "echarts_timeseries_bar"
@@ -420,6 +427,7 @@ class MigrateDistBarChart(TimeseriesChart):
         return super().build_query()
 
 
+## OK
 class MigrateBubbleChart(MigrateViz):
     source_viz_type = "bubble"
     target_viz_type = "bubble_v2"
@@ -462,14 +470,12 @@ class MigrateBubbleChart(MigrateViz):
             new_query_object = {**base_query_object, "columns": columns}
             if orderby is not None:
                 new_query_object["orderby"] = orderby
-            else:
-                new_query_object["orderby"] = None
 
             return [new_query_object]
-
+ 
         return build_query_context(self.data, process)
 
-
+## OK 167
 class MigrateHeatmapChart(MigrateViz):
     source_viz_type = "heatmap"
     target_viz_type = "heatmap_v2"
@@ -513,10 +519,12 @@ class MigrateHeatmapChart(MigrateViz):
         else:
             group_by = None
 
+
         def process(base_query_object: dict):
             new_query_object = base_query_object.copy()
             new_query_object["columns"] = columns
-            new_query_object["orderby"] = orderby if orderby else None
+            if orderby:
+                new_query_object["orderby"] = orderby
             new_query_object["post_processing"] = [
                 rank_operator(self.data, base_query_object, {"metric": metric, "group_by": group_by})
             ]
@@ -525,7 +533,7 @@ class MigrateHeatmapChart(MigrateViz):
         
         return build_query_context(self.data, process)
 
-
+## OK 168
 class MigrateHistogramChart(MigrateViz):
     source_viz_type = "histogram"
     target_viz_type = "histogram_v2"
@@ -562,6 +570,7 @@ class MigrateHistogramChart(MigrateViz):
         return build_query_context(self.data, process)
 
 
+## OK 169
 class MigrateSankey(MigrateViz):
     source_viz_type = "sankey"
     target_viz_type = "sankey_v2"

@@ -17,15 +17,28 @@
 from typing import Type, Any
 import sqlalchemy as sa
 import click
-#import json
+
+# import json
 from click_option_group import optgroup, RequiredAnyOptionGroup
 from flask.cli import with_appcontext
 from superset import db
 from sqlalchemy.ext.declarative import declarative_base
-from superset.migrations.shared.migrate_viz.processors import MigrateLineChart
+from superset.migrations.shared.migrate_viz.processors import (
+    MigrateLineChart,
+    MigratePivotTable,
+    MigrateBubbleChart,
+    MigrateTreeMap,
+    MigrateDualLine,
+    MigrateSunburst,
+    MigrateBubbleChart,
+    MigrateHeatmapChart,
+    MigrateHistogramChart,
+    MigrateSankey
+)
 from superset.utils import core as utils, json
 
 Base: Type[Any] = declarative_base()
+
 
 class Slice(Base):
     __tablename__ = "slices"
@@ -33,6 +46,7 @@ class Slice(Base):
     id = sa.Column(sa.Integer, primary_key=True)
     params = sa.Column(utils.MediumText())
     query_context = sa.Column(utils.MediumText())
+
 
 @click.group()
 def generate_query_context() -> None:
@@ -54,11 +68,17 @@ def generate_query_context() -> None:
 def run(id: int | None = None) -> None:
     """Generate a query context for a chart"""
     slice = db.session.query(Slice).filter(Slice.id == id).one_or_none()
-    
+
     form_data = slice.params
-    
-    migrate_line_chart_obj = MigrateLineChart(form_data)
+
+    # migrate_line_chart_obj = MigrateLineChart(form_data)
+    # migrate_line_chart_obj = MigratePivotTable(form_data)
+    # migrate_line_chart_obj = MigrateTreeMap(form_data)
+    migrate_line_chart_obj = MigrateDualLine(form_data)
+    # migrate_line_chart_obj = MigrateSunburst(form_data)
+    # migrate_line_chart_obj = MigrateBubbleChart(form_data)
+    #migrate_line_chart_obj = MigrateHeatmapChart(form_data)
+    #migrate_line_chart_obj = MigrateHistogramChart(form_data)
+    #migrate_line_chart_obj = MigrateSankey(form_data)
     result = migrate_line_chart_obj.build_query()
     print(json.dumps(result))
-
-

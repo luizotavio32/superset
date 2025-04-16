@@ -761,23 +761,30 @@ def build_query_object(form_data, query_fields=None):
         'orderby': orderby,
         'annotation_layers': annotation_layers,
         'series_columns': series_columns,
+        'row_limit':  None if row_limit is None or math.isnan(numeric_row_limit) else int(numeric_row_limit),
+        'series_limit': int(series_limit) if series_limit is not None else (int(limit) if is_defined(limit) else 0),
+        'order_desc': True if order_desc is None else order_desc,
         'url_params': url_params,
         'custom_params': custom_params,
     }
 
     row_offset = None if row_offset is None or math.isnan(numeric_row_offset) else numeric_row_offset
     series_limit_metric = (normalize_series_limit_metric(series_limit_metric) or timeseries_limit_metric or None)
-    row_limit = None if row_limit is None or math.isnan(numeric_row_limit) else numeric_row_limit
-    order_desc = True if order_desc is None else order_desc
-    series_limit = series_limit if series_limit is not None else (float(limit) if is_defined(limit) else 0)
+   
+    
+    
 
-    for key, value in [("time_range", time_range), ("since", since), ("until", until), ("granularity", granularity), ("series_limit_metric", series_limit_metric), ("row_offset", row_offset), ("row_limit", row_limit), ("order_desc", order_desc), ("series_limit", series_limit)]:
+    for key, value in [("time_range", time_range), ("since", since), ("until", until), ("granularity", granularity), ("series_limit_metric", series_limit_metric), ("row_offset", row_offset) ]:
         if value is not None:
             query_object[key] = value
+
+    
     
     
     # Override extra form data
     query_object = override_extra_form_data(query_object, overrides)
+
+    query_object = {k: v for k, v in query_object.items() if v is not None}
     
     # Return the final query object with custom form data
     return {**query_object, 'custom_form_data': custom_form_data}
