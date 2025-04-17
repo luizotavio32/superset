@@ -24,6 +24,7 @@ import {
   PostProcessingPivot,
   getXAxisLabel,
 } from '@superset-ui/core';
+import { findFirstNonEmptyArray } from '@superset-ui/chart-controls';
 import { getMetricOffsetsMap, isTimeComparison } from './utils';
 import { PostProcessingFactory } from './types';
 
@@ -32,7 +33,10 @@ export const timeComparePivotOperator: PostProcessingFactory<
 > = (formData, queryObject) => {
   const metricOffsetMap = getMetricOffsetsMap(formData, queryObject);
   const xAxisLabel = getXAxisLabel(formData);
-  const columns = queryObject.series_columns || queryObject.columns;
+  const columns = findFirstNonEmptyArray(
+    queryObject.series_columns?.map(getColumnLabel),
+    queryObject.columns?.map(getColumnLabel),
+  );
 
   if (isTimeComparison(formData, queryObject) && xAxisLabel) {
     const aggregates = Object.fromEntries(

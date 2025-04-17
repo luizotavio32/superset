@@ -23,6 +23,7 @@ import {
   PostProcessingPivot,
   getXAxisLabel,
 } from '@superset-ui/core';
+import { findFirstNonEmptyArray } from '@superset-ui/chart-controls';
 import { PostProcessingFactory } from './types';
 import { extractExtraMetrics } from './utils';
 
@@ -35,7 +36,10 @@ export const pivotOperator: PostProcessingFactory<PostProcessingPivot> = (
     ...extractExtraMetrics(formData),
   ].map(getMetricLabel);
   const xAxisLabel = getXAxisLabel(formData);
-  const columns = queryObject.series_columns || queryObject.columns;
+  const columns = findFirstNonEmptyArray(
+    queryObject.series_columns?.map(getColumnLabel),
+    queryObject.columns?.map(getColumnLabel),
+  );
 
   if (xAxisLabel && metricLabels.length) {
     return {

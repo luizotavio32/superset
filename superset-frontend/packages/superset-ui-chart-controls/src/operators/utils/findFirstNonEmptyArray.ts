@@ -17,10 +17,14 @@
  * specific language governing permissions and limitationsxw
  * under the License.
  */
-export { getMetricOffsetsMap } from './getMetricOffsetsMap';
-export { isTimeComparison } from './isTimeComparison';
-export { isDerivedSeries } from './isDerivedSeries';
-export { extractExtraMetrics } from './extractExtraMetrics';
-export { getOriginalSeries, hasTimeOffset, getTimeOffset } from './timeOffset';
-export { findFirstNonEmptyArray } from './findFirstNonEmptyArray';
-export { TIME_COMPARISON_SEPARATOR } from './constants';
+import { ensureIsArray } from "@superset-ui/core";
+
+export const findFirstNonEmptyArray = (...columns: (string[] | undefined)[]) => {
+    for (const obj of columns) {
+      const array = ensureIsArray(obj);
+      if (array.length > 0) {
+        return array;
+      }
+    }
+    return [];
+  };

@@ -23,7 +23,9 @@ import {
   getMetricLabel,
   ComparisonType,
   getXAxisLabel,
+  getColumnLabel
 } from '@superset-ui/core';
+import { findFirstNonEmptyArray } from '@superset-ui/chart-controls';
 import { PostProcessingFactory } from './types';
 import { getMetricOffsetsMap, isTimeComparison } from './utils';
 
@@ -32,8 +34,9 @@ export const renameOperator: PostProcessingFactory<PostProcessingRename> = (
   queryObject,
 ) => {
   const metrics = ensureIsArray(queryObject.metrics);
-  const columns = ensureIsArray(
-    queryObject.series_columns || queryObject.columns,
+  const columns = findFirstNonEmptyArray(
+    queryObject.series_columns?.map(getColumnLabel),
+    queryObject.columns?.map(getColumnLabel),
   );
   const { truncate_metric } = formData;
   const xAxisLabel = getXAxisLabel(formData);
