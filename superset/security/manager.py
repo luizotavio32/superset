@@ -581,10 +581,9 @@ def freeze_value(value: Any) -> str:
 BASE_AXIS_SYNTHETIC_KEYS = frozenset({"columnType", "isColumnReference"})
 
 
-def _denormalize_base_axis_column(value: Any) -> Any:
+def _base_axis_identities(value: Any) -> set[str]:
     """
-    Reduce a synthesized ``BASE_AXIS`` x-axis column back to the reference it
-    stands for.
+    Identities a synthesized ``BASE_AXIS`` x-axis column may legitimately match.
 
     Before a chart is queried, ``normalizeTimeColumn`` (superset-ui-core,
     ``normalizeTimeColumn.ts``) replaces the chart's saved x-axis in the query
@@ -596,43 +595,71 @@ def _denormalize_base_axis_column(value: Any) -> Any:
     * for an *adhoc* x-axis it copies the saved adhoc column and adds the
       markers (plus the time grain, already dropped by ``freeze_value``).
 
-    Neither form selects data beyond the saved x-axis, yet neither appears
+    Some plugins assemble the same column themselves instead of going through
+    ``normalizeTimeColumn`` (e.g. Box Plot's ``buildQuery``, which distributes
+    over a temporal column) and omit the ``isColumnReference`` marker. Such a
+    column is still recognisable as a bare reference because its
+    ``sqlExpression`` and ``label`` are both just the column name.
+
+    None of these forms select data beyond the saved x-axis, yet none appears
     verbatim in the chart's stored ``params``/``query_context`` (the x-axis is
     stored under its own ``x_axis`` control, and for charts whose saved
     ``query_context`` is NULL there is nothing to compare against at all). So a
     guest merely loading such a chart would otherwise be rejected as a tamperer.
 
-    This collapses the synthesized column to its underlying reference, so it
-    compares equal to the stored x-axis: a physical reference becomes its column
-    name, and an adhoc reference becomes the underlying adhoc column without the
-    synthesized markers. The collapsed value must still match a value stored on
-    the chart, so tagging an unrelated column or free-form SQL as ``BASE_AXIS``
-    grants no additional access. Non-``BASE_AXIS`` values are returned unchanged.
-
-    This has to reduce the value rather than merely drop keys the way
-    ``GUEST_OVERRIDABLE_VALUE_KEYS`` handles ``timeGrain``: a physical x-axis is
-    stored as a bare string (e.g. ``"order_date"``) but sent as a dict, so no
-    amount of key-stripping makes the two compare equal; the dict must collapse
-    back to the string.
+    Rather than reducing to a single value, this returns every identity the
+    column could stand for, because a physical x-axis is stored as a bare string
+    (e.g. ``"order_date"``) while an adhoc one is stored as a dict, and the same
+    payload shape can plausibly be either. The caller requires one of these
+    identities to match a value stored on the chart, so tagging an unrelated
+    column or free-form SQL as ``BASE_AXIS`` grants no additional access.
+    Non-``BASE_AXIS`` values yield only their exact frozen value.
     """
     if not isinstance(value, dict) or value.get("columnType") != "BASE_AXIS":
-        return value
-    if value.get("isColumnReference") and isinstance(value.get("sqlExpression"), str):
-        return value["sqlExpression"]
-    return {k: v for k, v in value.items() if k not in BASE_AXIS_SYNTHETIC_KEYS}
+        return {freeze_value(value)}
+
+    # The adhoc form: the saved column with the frontend-only markers dropped.
+    identities = {
+        freeze_value(
+            {k: v for k, v in value.items() if k not in BASE_AXIS_SYNTHETIC_KEYS}
+        )
+    }
+    sql_expression = value.get("sqlExpression")
+    # The physical form, collapsed back to the column name it references.
+    if isinstance(sql_expression, str) and (
+        value.get("isColumnReference") or sql_expression == value.get("label")
+    ):
+        identities.add(freeze_value(sql_expression))
+    return identities
 
 
-def _payload_value_identity(value: Any, *, is_metric: bool) -> str:
+def _requested_payload_values(value: Any) -> list[Any]:
     """
-    Comparison identity for a column or metric in the guest anti-tamper check.
+    The individual column/metric values a requested payload field carries.
+
+    Some controls are scalar even where the query field is a list (Heatmap's
+    ``groupby`` is a bare column name), and ``form_data`` echoes them in that
+    shape. Iterating a string directly would compare it character by character,
+    so wrap a non-sequence in a single-element list.
+    """
+    if value is None or value == "":
+        return []
+    if isinstance(value, (str, dict)) or not isinstance(value, (list, tuple)):
+        return [value]
+    return list(value)
+
+
+def _payload_value_identities(value: Any, *, is_metric: bool) -> set[str]:
+    """
+    Comparison identities for a column or metric in the guest anti-tamper check.
 
     Metrics compare by exact frozen value. Columns additionally collapse a
     synthesized ``BASE_AXIS`` x-axis to the column it references, so a guest is
     not rejected for a column the frontend derived from the chart's own x-axis.
     """
     if is_metric:
-        return freeze_value(value)
-    return freeze_value(_denormalize_base_axis_column(value))
+        return {freeze_value(value)}
+    return _base_axis_identities(value)
 
 
 def _native_filter_allowed_targets(
@@ -813,10 +840,12 @@ def _requested_sort_target_identifiers(item: Any) -> set[str]:
     Identifiers a requested orderby term may use.
 
     String terms are result keys. Dict-shaped terms carry expression bodies, so
-    they authorize only by exact stored identity and never by a reused label.
+    they authorize only by exact stored identity (or, for a synthesized
+    ``BASE_AXIS`` x-axis, the reference it collapses to) and never by a reused
+    label. Terms of any other shape authorize nothing.
     """
     if isinstance(item, (str, dict)):
-        return {freeze_value(item)}
+        return _base_axis_identities(item)
     return set()
 
 
@@ -829,10 +858,17 @@ def _add_visible_sort_targets(
 ) -> None:
     """
     Add visible column/metric orderby identifiers from a stored control value.
+
+    Controls may be list-valued (``groupby``) or scalar (Heatmap's ``groupby``,
+    Word Cloud's ``series``); a scalar is treated as a single-value control.
     """
-    if not isinstance(values, (list, tuple)):
+    if values is None or values == "":
         return
+    if not isinstance(values, (list, tuple)):
+        values = [values]
     for value in values:
+        if value is None or value == "":
+            continue
         label = _get_form_data_item_label(value, is_metric=is_metric)
         if label is not None and _is_hidden_table_column(column_config, label):
             continue
@@ -850,39 +886,28 @@ def _collect_sortable_identifiers(
     owner-defined orderby replay is handled separately because saved orderby may
     intentionally reference a non-visible helper term, while guest-initiated
     sorting should be limited to visible result columns.
+
+    The same control names the subset check reads are used here, so the two
+    cannot drift apart: any control that can put a column or metric into the
+    query is also a dimension the chart renders and may be sorted by. This
+    includes the x-axis, which is held under its own control and arrives as the
+    synthesized BASE_AXIS column (reduced to its reference by the caller).
     """
     allowed: set[str] = set()
     params = stored_chart.params_dict
     column_config = params.get("column_config")
 
-    for key in ("columns", "groupby", "all_columns"):
+    for key in _STORED_COLUMN_PARAMS:
         _add_visible_sort_targets(
             allowed,
             params.get(key),
             column_config,
             is_metric=False,
         )
-    # The x-axis is a visible dimension held under its own control; a guest may
-    # legitimately sort an embedded chart by it (the request sends it as the
-    # synthesized BASE_AXIS column, reduced to its reference below).
-    if params.get("x_axis"):
+    for key in _STORED_METRIC_PARAMS:
         _add_visible_sort_targets(
             allowed,
-            [params["x_axis"]],
-            column_config,
-            is_metric=False,
-        )
-    _add_visible_sort_targets(
-        allowed,
-        params.get("metrics"),
-        column_config,
-        is_metric=True,
-    )
-    # Legacy charts store a single metric under the singular ``metric`` key.
-    if params.get("metric") is not None:
-        _add_visible_sort_targets(
-            allowed,
-            [params["metric"]],
+            params.get(key),
             column_config,
             is_metric=True,
         )
@@ -913,9 +938,20 @@ def _collect_stored_orderby_entries(
     """
     Frozen saved orderby entries a guest may replay exactly.
     """
-    allowed: set[str] = {
-        freeze_value(entry) for entry in stored_chart.params_dict.get("orderby") or []
-    }
+    params = stored_chart.params_dict
+    allowed: set[str] = {freeze_value(entry) for entry in params.get("orderby") or []}
+    # Gantt saves its sort under ``order_by_cols``, holding each entry as a
+    # JSON-encoded ``[column, ascending]`` string that ``extractQueryFields``
+    # decodes into the query's ``orderby``. Decode it the same way so the
+    # owner-defined sort is recognised on replay.
+    for entry in params.get("order_by_cols") or []:
+        if isinstance(entry, str):
+            try:
+                allowed.add(freeze_value(json.loads(entry)))
+            except (TypeError, ValueError):
+                continue
+        else:
+            allowed.add(freeze_value(entry))
     if stored_query_context:
         for query in stored_query_context.get("queries") or []:
             allowed.update(freeze_value(entry) for entry in query.get("orderby") or [])
@@ -1059,12 +1095,12 @@ def _orderby_modified(
             return True
         if freeze_value(entry) in stored_orderby_entries:
             continue
-        # Reduce a synthesized BASE_AXIS x-axis sort target back to the reference
-        # it stands for, so sorting by the chart's own temporal dimension is not
-        # read as a new expression. The reduced target must still be a visible
-        # sort target, so this grants nothing beyond the chart's own columns.
-        target = _denormalize_base_axis_column(entry[0])
-        if not _requested_sort_target_identifiers(target) & visible_targets:
+        # Collapse a synthesized BASE_AXIS x-axis sort target to the reference it
+        # stands for, so sorting by the chart's own temporal dimension is not
+        # read as a new expression. One of the collapsed identities must still be
+        # a visible sort target, so this grants nothing beyond the chart's own
+        # columns.
+        if not _requested_sort_target_identifiers(entry[0]) & visible_targets:
             return True
     return False
 
@@ -1073,9 +1109,16 @@ def _orderby_modified(
 #: types store their metrics under control-specific keys (``metric`` for
 #: big number, ``x``/``y``/``size`` for bubble, and so on); a guest requesting
 #: the exact stored value reads nothing beyond what the chart already shows.
-_STORED_METRIC_PARAMS = (
+#: A chart's plugin decides which control feeds ``metrics``/``columns`` in the
+#: generated query, either through the ``queryFields`` aliases resolved by
+#: ``extractQueryFields`` (superset-ui-core, ``extractQueryFields.ts``) or by
+#: assembling the query fields directly in its ``buildQuery``. Both lists below
+#: mirror those control names; keep them in sync with the plugins when a new
+#: chart type routes a control into a query field.
+_STORED_METRIC_PARAMS_BASE = (
     "metrics",
     "metric",
+    "metric_2",
     "percent_metrics",
     "secondary_metric",
     "series_limit_metric",
@@ -1083,12 +1126,14 @@ _STORED_METRIC_PARAMS = (
     "x",
     "y",
     "size",
+    # Gantt renders its tooltip metrics through the query's ``metrics``.
+    "tooltip_metrics",
 )
 
 #: Chart params keys that hold the columns/group-bys a chart renders, across
 #: the control names chart types use for them (``entity``/``series`` for
 #: bubble and world map, ``granularity_sqla`` for the temporal axis, etc.).
-_STORED_COLUMN_PARAMS = (
+_STORED_COLUMN_PARAMS_BASE = (
     "columns",
     "groupby",
     "all_columns",
@@ -1097,7 +1142,41 @@ _STORED_COLUMN_PARAMS = (
     "series_columns",
     "x_axis",
     "granularity_sqla",
+    # Histogram bins a single column; pivot table splits its group-bys in two.
+    "column",
+    "groupbyColumns",
+    "groupbyRows",
+    # Graph and Sankey describe edges as source/target (plus graph categories).
+    "source",
+    "target",
+    "source_category",
+    "target_category",
+    # Tree walks a parent/child hierarchy.
+    "id",
+    "parent",
+    "name",
+    # Gantt lays out spans, grouped by a y-axis, with extra tooltip columns.
+    "start_time",
+    "end_time",
+    "y_axis",
+    "tooltip_columns",
 )
+
+
+def _with_comparison_suffix(keys: tuple[str, ...]) -> tuple[str, ...]:
+    """
+    Include the ``_b`` variants of every control name.
+
+    Mixed Timeseries renders two independent queries from one chart, and stores
+    the second query's controls under a ``_b`` suffix (``metrics_b``,
+    ``groupby_b``, ...). Those values are saved on the chart just like their
+    unsuffixed counterparts, so a guest replaying them reads nothing extra.
+    """
+    return keys + tuple(f"{key}_b" for key in keys)
+
+
+_STORED_METRIC_PARAMS = _with_comparison_suffix(_STORED_METRIC_PARAMS_BASE)
+_STORED_COLUMN_PARAMS = _with_comparison_suffix(_STORED_COLUMN_PARAMS_BASE)
 
 
 def _stored_param_values(params: dict[str, Any], keys: tuple[str, ...]) -> set[str]:
@@ -1131,11 +1210,11 @@ def _columns_metrics_modified(
     chart exposes. Each requested set must be a subset of the values stored on
     the chart (params and, when present, the stored query context).
 
-    Column-valued keys compare by an identity that first collapses a
-    frontend-synthesized ``BASE_AXIS`` x-axis back to the column it references
-    (see ``_denormalize_base_axis_column``), and additionally allow the chart's
-    stored ``x_axis``: the x-axis is a saved dimension the query carries in
-    ``columns`` but that is not itself listed under ``columns``/``groupby``.
+    Column-valued keys compare by the identities a value may stand for, which
+    collapse a frontend-synthesized ``BASE_AXIS`` x-axis back to the column it
+    references (see ``_base_axis_identities``), and additionally allow the
+    chart's stored ``x_axis``: the x-axis is a saved dimension the query carries
+    in ``columns`` but that is not itself listed under ``columns``/``groupby``.
     """
     for key, stored_params_keys, equivalent in [
         ("metrics", _STORED_METRIC_PARAMS, ["metrics"]),
@@ -1144,13 +1223,6 @@ def _columns_metrics_modified(
     ]:
         is_metric = key == "metrics"
 
-        # Requested column values additionally collapse a frontend-synthesized
-        # ``BASE_AXIS`` x-axis to the column it references (see
-        # ``_payload_value_identity``); metrics compare by exact frozen value.
-        requested_values = {
-            _payload_value_identity(value, is_metric=is_metric)
-            for value in form_data.get(key) or []
-        }
         # Stored params are read across every control name that can hold a
         # metric or column for some chart type: charts whose query is built
         # from e.g. ``metric``/``entity``/``groupby`` never store a literal
@@ -1161,25 +1233,31 @@ def _columns_metrics_modified(
         stored_values = _stored_param_values(
             stored_chart.params_dict, stored_params_keys
         )
-        if not requested_values.issubset(stored_values):
-            return True
-
-        # compare queries in query_context
-        queries_values = {
-            _payload_value_identity(value, is_metric=is_metric)
-            for query in query_context.queries
-            for value in getattr(query, key, []) or []
-        }
+        # A stored query_context is itself frontend-generated, so it can hold the
+        # synthesized ``BASE_AXIS`` shape. Contribute the identities each stored
+        # value may stand for, so a request that sends the same x-axis in the
+        # other shape still matches.
         if stored_query_context:
             for query in stored_query_context.get("queries") or []:
                 for equiv_key in equivalent:
-                    stored_values.update(
-                        _payload_value_identity(value, is_metric=is_metric)
-                        for value in query.get(equiv_key) or []
-                    )
+                    for value in query.get(equiv_key) or []:
+                        stored_values |= _payload_value_identities(
+                            value, is_metric=is_metric
+                        )
 
-        if not queries_values.issubset(stored_values):
-            return True
+        # Requested column values additionally collapse a frontend-synthesized
+        # ``BASE_AXIS`` x-axis to the column it references (see
+        # ``_payload_value_identities``); metrics compare by exact frozen value.
+        # A value is authorized when any identity it may stand for is stored.
+        requested = _requested_payload_values(form_data.get(key))
+        for query in query_context.queries:
+            requested.extend(_requested_payload_values(getattr(query, key, None)))
+        for value in requested:
+            if (
+                not _payload_value_identities(value, is_metric=is_metric)
+                & stored_values
+            ):
+                return True
 
     return False
 

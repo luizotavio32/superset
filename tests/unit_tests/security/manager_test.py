@@ -3595,3 +3595,389 @@ def test_validate_guest_token_resources_accepts_embedded_int_id(
     sm.validate_guest_token_resources(
         [{"type": GuestTokenResourceType.DASHBOARD, "id": 5}]
     )
+
+
+def _payload_query(
+    columns: Optional[list[Any]] = None,
+    metrics: Optional[list[Any]] = None,
+    groupby: Optional[list[Any]] = None,
+    orderby: Optional[list[Any]] = None,
+) -> QueryObject:
+    """
+    A QueryObject shaped like the payload a chart plugin's ``buildQuery`` emits.
+
+    Columns and metrics are deliberately loosely typed: plugins put bare column
+    names, adhoc dicts and synthesized BASE_AXIS columns in the same list.
+    """
+    return QueryObject(
+        columns=columns,
+        metrics=metrics,
+        groupby=groupby,
+        orderby=orderby,
+    )
+
+
+def _guest_chart(
+    mocker: MockerFixture,
+    params: dict[str, Any],
+    queries: list[QueryObject],
+    form_data: Optional[dict[str, Any]] = None,
+) -> Any:
+    """
+    A QueryContext for a guest loading the chart described by ``params``.
+
+    The chart's saved ``query_context`` is NULL, which is the common case for
+    charts that have not been re-saved since the query context was introduced.
+    """
+    query_context = mocker.MagicMock()
+    query_context.slice_.id = 42
+    query_context.slice_.query_context = None
+    query_context.slice_.params_dict = params
+    query_context.form_data = {"slice_id": 42, **(form_data or {})}
+    query_context.queries = queries
+    return query_context
+
+
+# Each entry is a chart type whose plugin routes control-specific params keys
+# into the generated query's ``columns``/``metrics``/``orderby``, together with
+# the payload its ``buildQuery`` produces for an untouched load. Before these
+# keys were recognised, every one of these legitimate guest loads was rejected
+# with "Guest user cannot modify chart payload".
+_CONTROL_SPECIFIC_CHART_PAYLOADS: list[
+    tuple[str, dict[str, Any], list[QueryObject]]
+] = [
+    (
+        # Histogram bins a single column, sent alongside its group-bys.
+        "histogram_v2",
+        {"column": "quantity_ordered", "groupby": ["deal_size"]},
+        [_payload_query(columns=["deal_size", "quantity_ordered"])],
+    ),
+    (
+        # Pivot table splits its group-bys across rows and columns.
+        "pivot_table_v2",
+        {
+            "groupbyColumns": ["product_line"],
+            "groupbyRows": ["country", "city"],
+            "metrics": ["count"],
+        },
+        [
+            _payload_query(
+                columns=["product_line", "country", "city"],
+                metrics=["count"],
+                orderby=[["count", False]],
+            )
+        ],
+    ),
+    (
+        # Graph describes edges as source/target plus optional categories.
+        "graph_chart",
+        {
+            "source": "deal_size",
+            "target": "product_line",
+            "metric": "count",
+        },
+        [
+            _payload_query(
+                columns=["deal_size", "product_line"],
+                metrics=["count"],
+                orderby=[["deal_size", True], ["product_line", True]],
+            )
+        ],
+    ),
+    (
+        # Sankey sends its source/target pair as the query's group-by.
+        "sankey_v2",
+        {"source": "product_line", "target": "deal_size", "metric": "count"},
+        [
+            _payload_query(
+                groupby=["product_line", "deal_size"],
+                metrics=["count"],
+                orderby=[["product_line", True], ["deal_size", True]],
+            )
+        ],
+    ),
+    (
+        # Tree walks a parent/child hierarchy.
+        "tree_chart",
+        {"id": "id", "parent": "parent", "name": "name", "metric": "count"},
+        [
+            _payload_query(
+                columns=["id", "parent", "name"],
+                metrics=["count"],
+                orderby=[["parent", True], ["id", True], ["name", True]],
+            )
+        ],
+    ),
+    (
+        # Word cloud sorts by its scalar ``series`` control.
+        "word_cloud",
+        {"series": "customer_name", "metric": "count"},
+        [
+            _payload_query(
+                columns=["customer_name"],
+                metrics=["count"],
+                orderby=[["customer_name", True]],
+            )
+        ],
+    ),
+    (
+        # Heatmap stores ``groupby`` as a bare string, not a list.
+        "heatmap_v2",
+        {"x_axis": "product_line", "groupby": "deal_size", "metric": "count"},
+        [
+            _payload_query(
+                columns=["product_line", "deal_size"],
+                metrics=["count"],
+                orderby=[["product_line", True], ["deal_size", True]],
+            )
+        ],
+    ),
+    (
+        # Gantt lays out spans and saves its sort as JSON-encoded strings.
+        "gantt_chart",
+        {
+            "start_time": "start_time",
+            "end_time": "end_time",
+            "y_axis": "status",
+            "series": "priority",
+            "tooltip_columns": ["project", "phase"],
+            "tooltip_metrics": ["count"],
+            "order_by_cols": ['["status",false]'],
+        },
+        [
+            _payload_query(
+                columns=[
+                    "start_time",
+                    "end_time",
+                    "status",
+                    "priority",
+                    "project",
+                    "phase",
+                ],
+                metrics=["count"],
+                orderby=[["status", False]],
+            )
+        ],
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "viz_type,params,queries",
+    _CONTROL_SPECIFIC_CHART_PAYLOADS,
+    ids=[case[0] for case in _CONTROL_SPECIFIC_CHART_PAYLOADS],
+)
+def test_query_context_modified_ok_control_specific_params_keys(
+    mocker: MockerFixture,
+    app_context: None,
+    viz_type: str,
+    params: dict[str, Any],
+    queries: list[QueryObject],
+) -> None:
+    """
+    A guest may load a chart whose query is built from control-specific keys.
+
+    These charts never store a literal ``columns``/``metrics`` key, so the guard
+    previously had nothing to compare the generated payload against and rejected
+    the load.
+    """
+    assert not query_context_modified(_guest_chart(mocker, params, queries))
+
+
+def test_query_context_modified_ok_box_plot_unmarked_base_axis(
+    mocker: MockerFixture,
+    app_context: None,
+) -> None:
+    """
+    Box Plot builds its temporal x-axis column itself rather than going through
+    ``normalizeTimeColumn``, so the synthesized column carries no
+    ``isColumnReference`` marker. It is still a bare reference to the stored
+    column (``sqlExpression`` == ``label``) and must be accepted.
+    """
+    params = {
+        "columns": ["order_date"],
+        "groupby": ["product_line"],
+        "metrics": ["count"],
+        "time_grain_sqla": "P1D",
+        "temporal_columns_lookup": {"order_date": True},
+    }
+    unmarked_base_axis = {
+        "timeGrain": "P1D",
+        "columnType": "BASE_AXIS",
+        "sqlExpression": "order_date",
+        "label": "order_date",
+        "expressionType": "SQL",
+    }
+    queries = [
+        _payload_query(
+            columns=[unmarked_base_axis, "product_line"],
+            metrics=["count"],
+        )
+    ]
+    assert not query_context_modified(_guest_chart(mocker, params, queries))
+
+
+def test_query_context_modified_ok_mixed_timeseries_suffixed_controls(
+    mocker: MockerFixture,
+    app_context: None,
+) -> None:
+    """
+    Mixed Timeseries renders two queries from one chart, the second built from
+    ``_b``-suffixed controls. Both queries replay the chart's own saved values.
+    """
+    params = {
+        "x_axis": "order_date",
+        "metrics": ["count"],
+        "groupby": [],
+        "metrics_b": ["sum__sales"],
+        "groupby_b": ["product_line"],
+    }
+    base_axis = _base_axis_physical_column("order_date", "P1M")
+    queries = [
+        _payload_query(columns=[base_axis], metrics=["count"]),
+        _payload_query(
+            columns=[base_axis, "product_line"],
+            metrics=["sum__sales"],
+        ),
+    ]
+    assert not query_context_modified(_guest_chart(mocker, params, queries))
+
+
+def test_query_context_modified_suffixed_control_does_not_widen_access(
+    mocker: MockerFixture,
+    app_context: None,
+) -> None:
+    """
+    Recognising ``_b`` controls must not let a guest request a column the chart
+    does not store under either the plain or the suffixed name.
+    """
+    params = {
+        "x_axis": "order_date",
+        "metrics": ["count"],
+        "metrics_b": ["sum__sales"],
+        "groupby_b": ["product_line"],
+    }
+    queries = [
+        _payload_query(columns=["ssn"], metrics=["count"]),
+    ]
+    assert query_context_modified(_guest_chart(mocker, params, queries))
+
+
+@pytest.mark.parametrize(
+    "queries,form_data",
+    [
+        # A column the chart does not reference under any control name.
+        ([_payload_query(columns=["ssn"], metrics=["count"])], None),
+        # A metric the chart does not store.
+        ([_payload_query(columns=["customer_name"], metrics=["sum__sales"])], None),
+        # An unrelated column smuggled in under the BASE_AXIS markers.
+        (
+            [
+                _payload_query(
+                    columns=[
+                        {
+                            "columnType": "BASE_AXIS",
+                            "expressionType": "SQL",
+                            "sqlExpression": "ssn",
+                            "label": "ssn",
+                        }
+                    ],
+                    metrics=["count"],
+                )
+            ],
+            None,
+        ),
+        # Free-form SQL disguised as a bare BASE_AXIS column reference.
+        (
+            [
+                _payload_query(
+                    columns=[
+                        {
+                            "columnType": "BASE_AXIS",
+                            "expressionType": "SQL",
+                            "sqlExpression": "(SELECT password FROM ab_user)",
+                            "label": "(SELECT password FROM ab_user)",
+                            "isColumnReference": True,
+                        }
+                    ],
+                    metrics=["count"],
+                )
+            ],
+            None,
+        ),
+        # A new expression as a sort target.
+        (
+            [
+                _payload_query(
+                    columns=["customer_name"],
+                    metrics=["count"],
+                    orderby=[["random()", True]],
+                )
+            ],
+            None,
+        ),
+        # Tampering via form_data rather than the query objects.
+        (
+            [_payload_query(columns=["customer_name"], metrics=["count"])],
+            {"columns": ["ssn"]},
+        ),
+    ],
+    ids=[
+        "unrelated_column",
+        "unstored_metric",
+        "base_axis_unrelated_column",
+        "base_axis_freeform_sql",
+        "new_orderby_expression",
+        "form_data_column",
+    ],
+)
+def test_query_context_modified_control_specific_keys_still_reject_tampering(
+    mocker: MockerFixture,
+    app_context: None,
+    queries: list[QueryObject],
+    form_data: Optional[dict[str, Any]],
+) -> None:
+    """
+    Widening the recognised control names must not widen what a guest can read:
+    values still have to match something the chart owner saved.
+    """
+    params = {"series": "customer_name", "metric": "count"}
+    assert query_context_modified(_guest_chart(mocker, params, queries, form_data))
+
+
+def test_query_context_modified_ok_scalar_column_control_in_form_data(
+    mocker: MockerFixture,
+    app_context: None,
+) -> None:
+    """
+    A scalar column control echoed in ``form_data`` is one value, not a sequence
+    of characters.
+
+    Heatmap stores ``groupby`` as a bare column name, and the request echoes it
+    in that shape. Iterating the string directly would compare "d", "e", "a", ...
+    against the stored values and reject the load.
+    """
+    params = {"x_axis": "product_line", "groupby": "deal_size", "metric": "count"}
+    queries = [
+        _payload_query(columns=["product_line", "deal_size"], metrics=["count"]),
+    ]
+    query_context = _guest_chart(
+        mocker,
+        params,
+        queries,
+        {"x_axis": "product_line", "groupby": "deal_size", "metric": "count"},
+    )
+    assert not query_context_modified(query_context)
+
+
+def test_query_context_modified_scalar_column_control_still_rejects_tampering(
+    mocker: MockerFixture,
+    app_context: None,
+) -> None:
+    """
+    Treating a scalar control as a single value must not accept a different one.
+    """
+    params = {"x_axis": "product_line", "groupby": "deal_size", "metric": "count"}
+    queries = [_payload_query(columns=["product_line"], metrics=["count"])]
+    query_context = _guest_chart(mocker, params, queries, {"groupby": "ssn"})
+    assert query_context_modified(query_context)
